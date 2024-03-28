@@ -11,7 +11,7 @@ Usage:
     [--download-archive <file>][--sync <file>][--extract-artist][--flac][--original-art]
     [--original-name][--no-original][--only-original][--name-format <format>]
     [--strict-playlist][--playlist-name-format <format>][--client-id <id>]
-    [--auth-token <token>][--overwrite][--no-playlist]
+    [--auth-token <token>][--overwrite][--no-playlist][--add-description][--add-playlist-subfolder]
     
     scdl -h | --help
     scdl --version
@@ -64,6 +64,8 @@ Options:
     --overwrite                     Overwrite file if it already exists
     --strict-playlist               Abort playlist downloading if one track fails to download
     --no-playlist                   Skip downloading playlists
+    --add-description               Adds the description to a seperate txt file (can be read by some players)
+    --add-playlist-subfolder        Puts playlist tracks into their own folder
 """
 
 import cgi
@@ -488,7 +490,19 @@ def download_playlist(client: SoundCloud, playlist: BasicAlbumPlaylist, **kwargs
                 else:
                     track = client.get_track(track.id)
 
+            if kwargs.get("add_playlist_subfolder"):
+                titleFolder = track.title.encode("utf-8", "ignore")
+                titleFolder = titleFolder.decode("utf-8")
+                titleFolder = sanitize_filename(titleFolder)
+                if not os.path.exists(titleFolder):
+                    os.makedirs(titleFolder)
+                os.chdir(titleFolder)
+
             download_track(client, track, playlist_info, kwargs.get("strict_playlist"), **kwargs)
+            if kwargs.get("add_playlist_subfolder"):
+                os.chdir("..")
+
+
     finally:
         if not kwargs.get("no_playlist_folder"):
             os.chdir("..")
@@ -700,7 +714,7 @@ def download_track(client: SoundCloud, track: BasicTrack, playlist_info=None, ex
         # Geoblocked track
         if track.policy == "BLOCK":
             raise SoundCloudException(f"{title} is not available in your location...")
-
+        
         # Downloadable track
         filename = None
         is_already_downloaded = False
