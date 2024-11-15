@@ -1,9 +1,9 @@
 """scdl allows you to download music from Soundcloud
 
 Usage:
-    scdl (-l <track_url> | me) [-a | -f | -C | -t | -p | -r][-c | --force-metadata]
-    [-n <maxtracks>][-o <offset>][--hidewarnings][--debug | --error][--path <path>]
-    [--addtofile][--addtimestamp][--onlymp3][--hide-progress][--min-size <size>]
+    scdl (-l <track_url> | -s <search_query> | me) [-a | -f | -C | -t | -p | -r]
+    [-c | --force-metadata][-n <maxtracks>][-o <offset>][--hidewarnings][--debug | --error]
+    [--path <path>][--addtofile][--addtimestamp][--onlymp3][--hide-progress][--min-size <size>]
     [--max-size <size>][--remove][--no-album-tag][--no-playlist-folder]
     [--download-archive <file>][--sync <file>][--extract-artist][--flac][--original-art]
     [--original-name][--original-metadata][--no-original][--only-original]
@@ -19,6 +19,7 @@ Options:
     -h --help                       Show this screen
     --version                       Show version
     -l [url]                        URL can be track/playlist/user
+    -s [search_query]               Search for a track/playlist/user and use the first result
     -n [maxtracks]                  Download the n last tracks of a playlist according to the
                                     creation date
     -a                              Download all tracks of user (including reposts)
@@ -191,6 +192,7 @@ class SCDLArgs(TypedDict):
     remove: bool
     strict_playlist: bool
     sync: Optional[str]
+    s: Optional[str]
     t: bool
 
 
@@ -259,13 +261,47 @@ def clean_up_locks() -> None:
 atexit.register(clean_up_locks)
 
 
-def get_filelock(path: Union[pathlib.Path, str], timeout: int = 10) -> filelock.FileLock:
+class SafeLock:
+    def __init__(
+        self,
+        lock_file: Union[str, os.PathLike],
+        timeout: float = -1,
+        mode: int = 0o644,
+        thread_local: bool = True,
+    ) -> None:
+        self._lock = filelock.FileLock(lock_file, timeout, mode, thread_local)
+        self._soft_lock = filelock.SoftFileLock(lock_file, timeout, mode, thread_local)
+        self._using_soft_lock = False
+
+    def __enter__(self):
+        try:
+            self._lock.acquire()
+            self._using_soft_lock = False
+            return self._lock
+        except NotImplementedError:
+            self._soft_lock.acquire()
+            self._using_soft_lock = True
+            return self._soft_lock
+
+    def __exit__(
+        self,
+        exc_type: Optional[Type[BaseException]],
+        exc_value: Optional[BaseException],
+        traceback: Optional[TracebackType],
+    ) -> None:
+        if self._using_soft_lock:
+            self._soft_lock.release()
+        else:
+            self._lock.release()
+
+
+def get_filelock(path: Union[pathlib.Path, str], timeout: int = 10) -> SafeLock:
     path = pathlib.Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path = path.resolve()
     file_lock_dirs.append(path.parent)
     lock_path = str(path) + ".scdl.lock"
-    return filelock.FileLock(lock_path, timeout=timeout)
+    return SafeLock(lock_path, timeout=timeout)
 
 
 def main() -> None:
@@ -366,6 +402,14 @@ def main() -> None:
         assert me is not None
         arguments["-l"] = me.permalink_url
 
+    if arguments["-s"]:
+        url = search_soundcloud(client, arguments["-s"])
+        if url:
+            arguments["-l"] = url
+        else:
+            logger.error("Search failed. Exiting...")
+            sys.exit(1)
+
     arguments["-l"] = validate_url(client, arguments["-l"])
 
     if arguments["--download-archive"]:
@@ -437,6 +481,23 @@ def validate_url(client: SoundCloud, url: str) -> str:
 
     logger.error("URL is not valid")
     sys.exit(1)
+
+
+def search_soundcloud(client: SoundCloud, query: str) -> Optional[str]:
+    """Search SoundCloud and return the URL of the first result."""
+    try:
+        results = list(client.search(query, limit=1))
+        if results:
+            item = results[0]
+            logger.info(f"Search resolved to url {item.permalink_url}")
+            if isinstance(item, (Track, AlbumPlaylist, User)):
+                return item.permalink_url
+            logger.warning(f"Unexpected search result type: {type(item)}")
+        logger.error(f"No results found for query: {query}")
+        return None
+    except Exception as e:
+        logger.error(f"Error searching SoundCloud: {e}")
+        return None
 
 
 def get_config(config_file: pathlib.Path) -> configparser.ConfigParser:
@@ -888,6 +949,7 @@ def download_original_file(
         not encoding_to_flac,  # copy the stream only if we aren't re-encoding to flac
         filename,
         kwargs,
+        playlist_info=playlist_info,
         skip_re_encoding=not encoding_to_flac,
     )
 
@@ -1381,7 +1443,7 @@ def re_encode_to_out(
     should_copy: bool,
     filename: str,
     kwargs: SCDLArgs,
-    playlist_info: Optional[PlaylistInfo] = None,
+    playlist_info: Optional[PlaylistInfo],
     skip_re_encoding: bool = False,
 ) -> None:
     to_stdout = is_downloading_to_stdout(kwargs)
